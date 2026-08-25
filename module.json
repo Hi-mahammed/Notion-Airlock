@@ -1,0 +1,302 @@
+{
+  "id": "muhamed/notion",
+  "name": "Notion Airlock",
+  "version": "0.1.5",
+  "provider": "notion",
+  "description": "Let an AI operator search, read, create, and update Notion pages and databases without betting your workspace on it. An agent that can touch Notion unattended is one bad inference away from archiving the wrong page or polluting a database — which is why most teams keep every create and update by hand. Notion Airlock gives the agent eight real Notion commands and removes the unattended trigger: reads run freely, while every page creation, database creation, block append, and archive stops at a human approval bound to the exact payload, executes once, and leaves an Ed25519-signed receipt. Approval is bound to the payload hash, so an edited payload has no approval and cannot run. Optimistic preconditions refuse stale approvals when the live page state moved since you approved. Pure domain planners are isolated from vault and I/O; a fixed-origin transport is the only network layer. Every successful result carries a deterministic SHA-256 event chain from intent through live observation and decision to verified outcome. The API token is read from RailCall's vault, never accepted as input, never logged, never returned, and Notion's own errors are surfaced instead of a fabricated success. contest:2026Q3.",
+  "auth": {
+    "type": "api_key",
+    "vault_provider": "notion",
+    "field": "NOTION_TOKEN"
+  },
+  "requires": {
+    "network": [
+      "api.notion.com"
+    ],
+    "subprocess": false,
+    "filesystem_writes": []
+  },
+  "commands": [
+    {
+      "id": "notion.search",
+      "title": "Search Notion",
+      "description": "Search indexed Notion pages and databases by title.",
+      "provider": "notion",
+      "risk": "low",
+      "mode": "read",
+      "side_effects": "none",
+      "requires": [
+        "NOTION_API_KEY"
+      ],
+      "preview": true,
+      "receipt_required": true,
+      "input_schema": {
+        "query": {
+          "type": "string",
+          "required": true,
+          "description": "Title text to search for. Empty string returns all indexed pages and databases."
+        },
+        "filter_type": {
+          "type": "string",
+          "required": false,
+          "description": "Restrict results to page or database."
+        },
+        "page_size": {
+          "type": "number",
+          "required": false,
+          "description": "Maximum number of results to return, from 1 to 100."
+        }
+      },
+      "output_schema": {
+        "results": "array",
+        "has_more": "boolean",
+        "next_cursor": "string",
+        "count": "number"
+      }
+    },
+    {
+      "id": "notion.get_page",
+      "title": "Get Notion page",
+      "description": "Retrieve a Notion page by its ID.",
+      "provider": "notion",
+      "risk": "low",
+      "mode": "read",
+      "side_effects": "none",
+      "requires": [
+        "NOTION_API_KEY"
+      ],
+      "preview": true,
+      "receipt_required": true,
+      "input_schema": {
+        "page_id": {
+          "type": "string",
+          "required": true,
+          "description": "Notion page ID, with or without hyphens."
+        }
+      },
+      "output_schema": {
+        "id": "string",
+        "url": "string",
+        "title": "string",
+        "archived": "boolean",
+        "parent": "object",
+        "last_edited_time": "string"
+      }
+    },
+    {
+      "id": "notion.create_page",
+      "title": "Create Notion page",
+      "description": "Create a page under a Notion page or database.",
+      "provider": "notion",
+      "risk": "medium",
+      "mode": "write",
+      "side_effects": "external",
+      "requires": [
+        "NOTION_API_KEY"
+      ],
+      "preview": true,
+      "receipt_required": true,
+      "input_schema": {
+        "parent_id": {
+          "type": "string",
+          "required": true,
+          "description": "ID of the parent page or database."
+        },
+        "parent_type": {
+          "type": "string",
+          "required": true,
+          "description": "Parent identifier type: page_id or database_id."
+        },
+        "title": {
+          "type": "string",
+          "required": true,
+          "description": "Title text for the new page."
+        },
+        "properties": {
+          "type": "object",
+          "required": false,
+          "description": "Optional database properties matching the database schema."
+        }
+      },
+      "output_schema": {
+        "id": "string",
+        "url": "string",
+        "title": "string",
+        "archived": "boolean",
+        "parent": "object",
+        "last_edited_time": "string"
+      }
+    },
+    {
+      "id": "notion.query_database",
+      "title": "Query Notion database",
+      "description": "Query a Notion database with optional filters and sorting.",
+      "provider": "notion",
+      "risk": "low",
+      "mode": "read",
+      "side_effects": "none",
+      "requires": [
+        "NOTION_API_KEY"
+      ],
+      "preview": true,
+      "receipt_required": true,
+      "input_schema": {
+        "database_id": {
+          "type": "string",
+          "required": true,
+          "description": "The Notion database ID."
+        },
+        "filter": {
+          "type": "object",
+          "required": false,
+          "description": "Optional Notion filter object."
+        },
+        "sorts": {
+          "type": "array",
+          "required": false,
+          "description": "Optional list of Notion sort objects."
+        },
+        "page_size": {
+          "type": "number",
+          "required": false,
+          "description": "Maximum number of results to return, from 1 to 100."
+        }
+      },
+      "output_schema": {
+        "results": "array",
+        "has_more": "boolean",
+        "next_cursor": "string",
+        "count": "number"
+      }
+    },
+    {
+      "id": "notion.get_database",
+      "title": "Get Notion database",
+      "description": "Retrieve a Notion database schema by ID.",
+      "provider": "notion",
+      "risk": "low",
+      "mode": "read",
+      "side_effects": "none",
+      "requires": [
+        "NOTION_API_KEY"
+      ],
+      "preview": true,
+      "receipt_required": true,
+      "input_schema": {
+        "database_id": {
+          "type": "string",
+          "required": true,
+          "description": "The Notion database ID."
+        }
+      },
+      "output_schema": {
+        "id": "string",
+        "url": "string",
+        "title": "string",
+        "parent": "object",
+        "properties": "array",
+        "last_edited_time": "string"
+      }
+    },
+    {
+      "id": "notion.create_database",
+      "title": "Create Notion database",
+      "description": "Create a database below a Notion page.",
+      "provider": "notion",
+      "risk": "medium",
+      "mode": "write",
+      "side_effects": "external",
+      "requires": [
+        "NOTION_API_KEY"
+      ],
+      "preview": true,
+      "receipt_required": true,
+      "input_schema": {
+        "parent_page_id": {
+          "type": "string",
+          "required": true,
+          "description": "ID of the parent Notion page."
+        },
+        "title": {
+          "type": "string",
+          "required": true,
+          "description": "Title of the new database."
+        },
+        "properties": {
+          "type": "object",
+          "required": true,
+          "description": "Notion property schema definitions."
+        }
+      },
+      "output_schema": {
+        "id": "string",
+        "url": "string",
+        "title": "string",
+        "parent": "object",
+        "properties": "array",
+        "last_edited_time": "string"
+      }
+    },
+    {
+      "id": "notion.append_blocks",
+      "title": "Append Notion blocks",
+      "description": "Append content blocks to a Notion page or block.",
+      "provider": "notion",
+      "risk": "medium",
+      "mode": "write",
+      "side_effects": "external",
+      "requires": [
+        "NOTION_API_KEY"
+      ],
+      "preview": true,
+      "receipt_required": true,
+      "input_schema": {
+        "block_id": {
+          "type": "string",
+          "required": true,
+          "description": "ID of the Notion page or block."
+        },
+        "children": {
+          "type": "array",
+          "required": true,
+          "description": "Array of Notion block objects to append."
+        }
+      },
+      "output_schema": {
+        "appended": "number",
+        "block_ids": "array",
+        "block_types": "array"
+      }
+    },
+    {
+      "id": "notion.archive_page",
+      "title": "Archive Notion page",
+      "description": "Archive a Notion page without permanently deleting it.",
+      "provider": "notion",
+      "risk": "medium",
+      "mode": "write",
+      "side_effects": "external",
+      "requires": [
+        "NOTION_API_KEY"
+      ],
+      "preview": true,
+      "receipt_required": true,
+      "input_schema": {
+        "page_id": {
+          "type": "string",
+          "required": true,
+          "description": "The Notion page ID."
+        }
+      },
+      "output_schema": {
+        "id": "string",
+        "url": "string",
+        "title": "string",
+        "archived": "boolean",
+        "parent": "object",
+        "last_edited_time": "string"
+      }
+    }
+  ],
+  "license_required": false
+}
