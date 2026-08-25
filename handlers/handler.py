@@ -13,13 +13,16 @@ via Studio's Integrations tab) into the handler context.
 """
 
 import json
-import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
 NOTION_API_BASE = "https://api.notion.com/v1"
 NOTION_VERSION = "2022-06-28"
+READ_RETRY_STATUSES = {429, 500, 502, 503, 504}
+MAX_READ_RETRIES = 2
+MAX_BLOCKS_PER_REQUEST = 100
 
 
 class NotionError(Exception):
@@ -38,19 +41,24 @@ class NotionError(Exception):
         }
 
 
-def _get_token(context):
-    if isinstance(context, dict):
-        for source in (context.get("env"), context.get("credentials")):
-            if isinstance(source, dict):
-                token = source.get("NOTION_API_KEY")
-                if isinstance(token, str) and token.strip():
-                    return token.strip()
+def _get_token():
+    helpers = globals().get("__rc_helpers__")
+    if not isinstance(helpers, dict):
+        return None
 
-    token = os.environ.get("NOTION_API_KEY")
+    vault_get = helpers.get("vault_get")
+    if not callable(vault_get):
+        return None
+
+    credential = vault_get("notion")
+    if not isinstance(credential, dict):
+        return None
+
+    token = credential.get("api_key")
     return token.strip() if isinstance(token, str) and token.strip() else None
 
 
-def _request(token, method, path, body=None):
+def _request(token, method, path, body=None, retryable=False):
     data = json.dumps(body).encode("utf-8") if body is not None else None
     request = urllib.request.Request(
         f"{NOTION_API_BASE}{path}",
@@ -63,37 +71,50 @@ def _request(token, method, path, body=None):
         },
     )
 
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            payload = response.read().decode("utf-8")
-            if not payload:
-                return {}
-            try:
-                return json.loads(payload)
-            except json.JSONDecodeError as error:
-                raise NotionError(
-                    "invalid_response",
-                    "Notion returned an invalid JSON response.",
-                    response.status,
-                ) from error
-    except urllib.error.HTTPError as error:
-        response_body = error.read().decode("utf-8", errors="replace")
+    attempts = MAX_READ_RETRIES + 1 if retryable else 1
+    for attempt in range(attempts):
         try:
-            response = json.loads(response_body)
-        except json.JSONDecodeError:
-            response = {}
-        message = response.get("message", response_body) if isinstance(response, dict) else response_body
-        code = response.get("code", "http_error") if isinstance(response, dict) else "http_error"
-        raise NotionError(code, message, error.code) from error
-    except urllib.error.URLError as error:
-        raise NotionError("network_error", str(error.reason)) from error
+            with urllib.request.urlopen(request, timeout=30) as response:
+                payload = response.read().decode("utf-8")
+                if not payload:
+                    return {}
+                try:
+                    return json.loads(payload)
+                except json.JSONDecodeError as error:
+                    raise NotionError(
+                        "invalid_response",
+                        "Notion returned an invalid JSON response.",
+                        response.status,
+                    ) from error
+        except urllib.error.HTTPError as error:
+            response_body = error.read().decode("utf-8", errors="replace")
+            if retryable and error.code in READ_RETRY_STATUSES and attempt < attempts - 1:
+                retry_after = error.headers.get("Retry-After")
+                try:
+                    delay = min(max(float(retry_after), 0), 5)
+                except (TypeError, ValueError):
+                    delay = min(0.5 * (2**attempt), 2)
+                time.sleep(delay)
+                continue
+
+            try:
+                response = json.loads(response_body)
+            except json.JSONDecodeError:
+                response = {}
+            message = response.get("message", response_body) if isinstance(response, dict) else response_body
+            code = response.get("code", "http_error") if isinstance(response, dict) else "http_error"
+            raise NotionError(code, message, error.code) from error
+        except urllib.error.URLError as error:
+            raise NotionError("network_error", str(error.reason)) from error
+
+    raise NotionError("request_failed", "The Notion request could not be completed.")
 
 
 def _run(operation, inputs, context):
     if not isinstance(inputs, dict):
         return NotionError("validation_error", "Command inputs must be an object.", 400).to_dict()
 
-    token = _get_token(context)
+    token = _get_token()
     if not token:
         return NotionError(
             "auth_missing",
@@ -119,9 +140,21 @@ def _resource_id(inputs, name):
 
 def _page_size(inputs):
     value = inputs.get("page_size", 10)
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 100:
-        raise NotionError("validation_error", "'page_size' must be an integer from 1 to 100.", 400)
-    return value
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not 1 <= value <= 100
+        or int(value) != value
+    ):
+        raise NotionError("validation_error", "'page_size' must be a whole number from 1 to 100.", 400)
+    return int(value)
+
+
+def _optional_cursor(inputs):
+    value = inputs.get("start_cursor")
+    if value is not None and (not isinstance(value, str) or not value.strip()):
+        raise NotionError("validation_error", "'start_cursor' must be a non-empty string.", 400)
+    return value.strip() if isinstance(value, str) else None
 
 
 def _optional_object(inputs, name):
@@ -133,15 +166,15 @@ def _optional_object(inputs, name):
 
 def _required_object(inputs, name):
     value = _optional_object(inputs, name)
-    if value is None:
-        raise NotionError("validation_error", f"'{name}' is required.", 400)
+    if not value:
+        raise NotionError("validation_error", f"'{name}' must be a non-empty object.", 400)
     return value
 
 
 def _required_array(inputs, name):
     value = inputs.get(name)
-    if not isinstance(value, list):
-        raise NotionError("validation_error", f"'{name}' must be an array.", 400)
+    if not isinstance(value, list) or not value:
+        raise NotionError("validation_error", f"'{name}' must be a non-empty array.", 400)
     return value
 
 
@@ -154,7 +187,11 @@ def _extract_title(resource):
             if property_value.get("type") == "title":
                 title = property_value.get("title", [])
                 break
-    return "".join(part.get("plain_text", "") for part in title)
+    return "".join(
+        part.get("plain_text", "")
+        for part in title
+        if isinstance(part, dict)
+    )
 
 
 def _summarize_page(page):
@@ -192,6 +229,9 @@ def notion_search(inputs, context):
             "query": _required_string(command_inputs, "query", allow_empty=True),
             "page_size": _page_size(command_inputs),
         }
+        start_cursor = _optional_cursor(command_inputs)
+        if start_cursor:
+            body["start_cursor"] = start_cursor
         filter_type = command_inputs.get("filter_type")
         if filter_type is not None:
             if filter_type not in {"page", "database"}:
@@ -202,7 +242,7 @@ def notion_search(inputs, context):
                 )
             body["filter"] = {"property": "object", "value": filter_type}
 
-        result = _request(token, "POST", "/search", body)
+        result = _request(token, "POST", "/search", body, retryable=True)
         results = result.get("results", [])
         return {
             "results": [
@@ -221,7 +261,12 @@ def notion_search(inputs, context):
 
 def notion_get_page(inputs, context):
     def operation(token, command_inputs):
-        page = _request(token, "GET", f"/pages/{_resource_id(command_inputs, 'page_id')}")
+        page = _request(
+            token,
+            "GET",
+            f"/pages/{_resource_id(command_inputs, 'page_id')}",
+            retryable=True,
+        )
         return _summarize_page(page)
 
     return _run(operation, inputs, context)
@@ -265,6 +310,9 @@ def notion_create_page(inputs, context):
 def notion_query_database(inputs, context):
     def operation(token, command_inputs):
         body = {"page_size": _page_size(command_inputs)}
+        start_cursor = _optional_cursor(command_inputs)
+        if start_cursor:
+            body["start_cursor"] = start_cursor
         filter_value = _optional_object(command_inputs, "filter")
         if filter_value:
             body["filter"] = filter_value
@@ -280,6 +328,7 @@ def notion_query_database(inputs, context):
             "POST",
             f"/databases/{_resource_id(command_inputs, 'database_id')}/query",
             body,
+            retryable=True,
         )
         results = result.get("results", [])
         return {
@@ -298,6 +347,7 @@ def notion_get_database(inputs, context):
             token,
             "GET",
             f"/databases/{_resource_id(command_inputs, 'database_id')}",
+            retryable=True,
         )
         return _summarize_database(database)
 
@@ -331,11 +381,19 @@ def notion_create_database(inputs, context):
 
 def notion_append_blocks(inputs, context):
     def operation(token, command_inputs):
+        children = _required_array(command_inputs, "children")
+        if len(children) > MAX_BLOCKS_PER_REQUEST:
+            raise NotionError(
+                "validation_error",
+                f"'children' cannot contain more than {MAX_BLOCKS_PER_REQUEST} blocks.",
+                400,
+            )
+
         result = _request(
             token,
             "PATCH",
             f"/blocks/{_resource_id(command_inputs, 'block_id')}/children",
-            {"children": _required_array(command_inputs, "children")},
+            {"children": children},
         )
         blocks = result.get("results", [])
         return {
